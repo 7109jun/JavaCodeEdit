@@ -72,6 +72,22 @@ jobs:
           printf '@echo off\r\nstart "" "%%~dp0jdk\\bin\\javaw.exe" -Dfile.encoding=UTF-8 -cp "%%~dp0classes" MiniJavaEditor %%*\r\n' > "$dest/run.bat"
           printf '@echo off\r\n"%%~dp0jdk\\bin\\java.exe" -Dfile.encoding=UTF-8 -cp "%%~dp0classes" MiniJavaEditor %%*\r\npause\r\n' > "$dest/run-debug.bat"
 
+          # ---- 무결성 검사: 텍스트로 깨진 파일이 묶음에 들어가지 않게 한다 ----
+          bad=0
+          # 1) .class 파일은 모두 매직 넘버 CAFEBABE 로 시작해야 한다
+          while IFS= read -r f; do
+            if [ "$(od -An -tx1 -N4 "$f" | tr -d " \n")" != "cafebabe" ]; then echo "::error::클래스 파일이 깨졌습니다(바이너리가 아님): $f"; bad=1; fi
+          done < <(find "$dest/classes" -name '*.class')
+          # 2) JDK 실행 파일은 Windows 실행 파일(MZ 헤더)이어야 한다
+          for f in bin/java.exe bin/javaw.exe bin/javac.exe; do
+            if [ "$(head -c2 "$dest/jdk/$f")" != "MZ" ]; then echo "::error::JDK 파일이 실행 파일이 아닙니다: $f"; bad=1; fi
+          done
+          # 3) JDK 핵심 이미지(lib/modules)는 수십 MB 이상이다
+          size=$(stat -c %s "$dest/jdk/lib/modules")
+          echo "jdk/lib/modules: $size bytes"
+          [ "$size" -gt 50000000 ] || { echo "::error::jdk/lib/modules 가 너무 작습니다"; bad=1; }
+          [ "$bad" = 0 ]
+
           (cd stage && zip -qr ../MiniJavaEditor-windows-x64.zip MiniJavaEditor)
           ls -lh MiniJavaEditor-windows-x64.zip
 
