@@ -1,0 +1,86 @@
+name: Package (Windows)
+
+# 저장소에 올라간 .class 파일과 Windows용 JDK를 묶어서 zip 아티팩트로 만든다 (컴파일 없음).
+# 이 파일의 위치: <저장소 루트>/.github/workflows/build.yml
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "21"
+
+jobs:
+  package:
+    name: Package (Windows x64)
+    runs-on: ubuntu-latest   # .class 는 OS와 무관하다. 묶음에 담는 JDK만 Windows용을 받는다.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # MiniJavaEditor.class 가 들어 있는 폴더를 저장소 안에서 찾는다 (예: Code/MiniJavaEditor/classes)
+      - name: Locate class files
+        run: |
+          set -euo pipefail
+          main=$(find . -name 'MiniJavaEditor.class' -not -path './.git/*' | head -n 1)
+          if [ -z "$main" ]; then
+            echo "::error::MiniJavaEditor.class 를 저장소에서 찾지 못했습니다"
+            exit 1
+          fi
+          dir=$(dirname "$main")
+          echo "CLASSES_DIR=$dir" >> "$GITHUB_ENV"
+          echo "classes dir: $dir ($(find "$dir" -name '*.class' | wc -l) class files)"
+
+      # Windows용 JDK (Eclipse Temurin, SHA-256 확인).
+      # 편집기가 javac(오류 검사/실행)를 쓰기 때문에 JRE가 아니라 전체 JDK가 필요하다.
+      - name: Download Windows JDK ${{ env.JAVA_VERSION }}
+        run: |
+          set -euo pipefail
+          api="https://api.adoptium.net/v3/assets/latest/${JAVA_VERSION}/hotspot"
+          curl -fsSL --retry 3 "${api}?architecture=x64&image_type=jdk&os=windows&vendor=eclipse" -o jdk-info.json
+
+          link=$(jq -r '.[0].binary.package.link'     jdk-info.json)
+          sha=$(jq -r  '.[0].binary.package.checksum' jdk-info.json)
+          release=$(jq -r '.[0].release_name'         jdk-info.json)
+          [ -n "$link" ] && [ "$link" != "null" ] && [ -n "$sha" ] && [ "$sha" != "null" ]
+
+          echo "JDK: $release"
+          curl -fsSL --retry 3 "$link" -o jdk-download.zip
+          echo "$sha  jdk-download.zip" | sha256sum -c -
+
+      - name: Assemble zip
+        run: |
+          set -euo pipefail
+          dest="stage/MiniJavaEditor"
+          rm -rf stage jdk-extract && mkdir -p "$dest"
+
+          cp -r "$CLASSES_DIR" "$dest/classes"
+
+          # 압축 안의 최상위 폴더(jdk-21.x+y)의 내용물을 jdk/ 로 옮긴다
+          unzip -qo jdk-download.zip -d jdk-extract
+          inner=$(find jdk-extract -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          mkdir -p "$dest/jdk"
+          cp -a "$inner"/. "$dest/jdk/"
+          for f in bin/java.exe bin/javaw.exe bin/javac.exe; do test -f "$dest/jdk/$f"; done
+
+          # 실행 파일 (묶음 안의 jdk 폴더를 쓴다)
+          printf '@echo off\r\nstart "" "%%~dp0jdk\\bin\\javaw.exe" -Dfile.encoding=UTF-8 -cp "%%~dp0classes" MiniJavaEditor %%*\r\n' > "$dest/run.bat"
+          printf '@echo off\r\n"%%~dp0jdk\\bin\\java.exe" -Dfile.encoding=UTF-8 -cp "%%~dp0classes" MiniJavaEditor %%*\r\npause\r\n' > "$dest/run-debug.bat"
+
+          (cd stage && zip -qr ../MiniJavaEditor-windows-x64.zip MiniJavaEditor)
+          ls -lh MiniJavaEditor-windows-x64.zip
+
+      # 실행 화면 아래쪽 "Artifacts"에서 내려받는다
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniJavaEditor-windows-x64
+          path: MiniJavaEditor-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0   # 이미 zip이라 다시 압축하지 않는다
